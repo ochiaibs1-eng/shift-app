@@ -66,27 +66,14 @@ function ShiftRequestApp() {
     loadMembers();
   }, [loadMembers]);
 
+  // プライバシー保護：他人（自分を含む）の既存の希望はいっさい読み込まない。
+  // 名前や月を切り替えたら、入力欄はまっさらにする。
+  // これにより、メンバー同士でお互いの希望は見られない（見られるのは合言葉を知るリーダーのみ）。
   useEffect(() => {
-    if (mode !== "member" || !currentMember) return;
-    let active = true;
-    (async () => {
-      try {
-        const res = await callRpc("app_get_my_requests", {
-          p_member: currentMember,
-          p_month: monthKey,
-        });
-        if (!active) return;
-        setMySel(res?.days || {});
-        setMySubmitted(Boolean(res?.submitted));
-        setOpenDay(null);
-      } catch (e) {
-        if (active) setErrMsg("希望データの読み込みに失敗しました。");
-      }
-    })();
-    return () => {
-      active = false;
-    };
-  }, [mode, currentMember, monthKey, callRpc]);
+    setMySel({});
+    setMySubmitted(false);
+    setOpenDay(null);
+  }, [currentMember, monthKey]);
 
   const loadLeaderData = useCallback(
     async (code) => {
