@@ -23,9 +23,18 @@ function ShiftRequestApp() {
   const [mode, setMode] = useState("member");
   const [currentMember, setCurrentMember] = useState("");
 
+  // メンバー本人ログイン
+  const [memberUnlocked, setMemberUnlocked] = useState(false);
+  const [memberCode, setMemberCode] = useState("");
+  const [memberPassInput, setMemberPassInput] = useState("");
+  const [memberPassError, setMemberPassError] = useState(false);
+  const [memberNewPass, setMemberNewPass] = useState("");
+  const [memberPassMsg, setMemberPassMsg] = useState("");
+
   const [mySel, setMySel] = useState({});
   const [mySubmitted, setMySubmitted] = useState(false);
   const [openDay, setOpenDay] = useState(null);
+  const [myNote, setMyNote] = useState(""); // その月全体についてリーダーへの連絡
 
   const LEADER_HINT = "1234";
   const [unlocked, setUnlocked] = useState(false);
@@ -37,6 +46,9 @@ function ShiftRequestApp() {
 
   const [newPass, setNewPass] = useState("");
   const [passMsg, setPassMsg] = useState("");
+
+  const [resetTarget, setResetTarget] = useState("");
+  const [resetMsg, setResetMsg] = useState("");
 
   const [busy, setBusy] = useState(false);
   const [errMsg, setErrMsg] = useState("");
@@ -66,14 +78,46 @@ function ShiftRequestApp() {
     loadMembers();
   }, [loadMembers]);
 
-  // プライバシー保護：他人（自分を含む）の既存の希望はいっさい読み込まない。
-  // 名前や月を切り替えたら、入力欄はまっさらにする。
-  // これにより、メンバー同士でお互いの希望は見られない（見られるのは合言葉を知るリーダーのみ）。
+  // 名前を切り替えたら、必ず再ログイン（他人の希望は本人の合言葉なしでは見えない）
   useEffect(() => {
+    setMemberUnlocked(false);
+    setMemberCode("");
+    setMemberPassInput("");
+    setMemberPassError(false);
     setMySel({});
     setMySubmitted(false);
     setOpenDay(null);
-  }, [currentMember, monthKey]);
+    setMyNote("");
+    setMemberNewPass("");
+    setMemberPassMsg("");
+  }, [currentMember]);
+
+  // ログイン中に月を変えたら、その月の自分のデータを読み込み直す
+  useEffect(() => {
+    if (mode !== "member" || !memberUnlocked || !memberCode) return;
+    let active = true;
+    (async () => {
+      try {
+        const res = await callRpc("app_member_get", {
+          p_member: currentMember,
+          p_code: memberCode,
+          p_month: monthKey,
+        });
+        if (!active) return;
+        if (res?.ok) {
+          setMySel(res.days || {});
+          setMySubmitted(Boolean(res.submitted));
+          setMyNote(res.note || "");
+          setOpenDay(null);
+        }
+      } catch (e) {
+        if (active) setErrMsg("希望データの読み込みに失敗しました。");
+      }
+    })();
+    return () => {
+      active = false;
+    };
+  }, [monthKey, memberUnlocked, memberCode, mode, currentMember, callRpc]);
 
   const loadLeaderData = useCallback(
     async (code) => {
@@ -100,6 +144,46 @@ function ShiftRequestApp() {
       loadLeaderData(leaderCode);
     }
   }, [mode, unlocked, leaderCode, monthKey, loadLeaderData]);
+
+  // ---- メンバー本人ログイン ----
+  async function memberUnlock() {
+    setBusy(true);
+    setMemberPassError(false);
+    try {
+      const res = await callRpc("app_member_get", {
+        p_member: currentMember,
+        p_code: memberPassInput,
+        p_month: monthKey,
+      });
+      if (res?.ok) {
+        setMemberUnlocked(true);
+        setMemberCode(memberPassInput);
+        setMySel(res.days || {});
+        setMySubmitted(Boolean(res.submitted));
+        setMyNote(res.note || "");
+        setMemberPassInput("");
+      } else {
+        setMemberPassError(true);
+      }
+    } catch (e) {
+      setMemberPassError(true);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function memberLogout() {
+    setMemberUnlocked(false);
+    setMemberCode("");
+    setMySel({});
+    setMySubmitted(false);
+    setMyNote("");
+    setOpenDay(null);
+    setMemberPassInput("");
+    setMemberPassError(false);
+    setMemberNewPass("");
+    setMemberPassMsg("");
+  }
 
   function toggleDay(day) {
     const key = ymd(viewYear, viewMonth, day);
@@ -132,13 +216,43 @@ function ShiftRequestApp() {
       }
       const res = await callRpc("app_submit", {
         p_member: currentMember,
+        p_code: memberCode,
         p_month: monthKey,
         p_days: daysThisMonth,
+        p_note: myNote,
       });
       if (res?.ok) setMySubmitted(true);
       else setErrMsg("送信に失敗しました。もう一度お試しください。");
     } catch (e) {
       setErrMsg("送信に失敗しました。通信環境を確認してください。");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function changeMemberPasscode() {
+    const np = memberNewPass.trim();
+    setMemberPassMsg("");
+    if (np.length < 4) {
+      setMemberPassMsg("合言葉は4文字以上にしてください。");
+      return;
+    }
+    setBusy(true);
+    try {
+      const res = await callRpc("app_member_change_passcode", {
+        p_member: currentMember,
+        p_code: memberCode,
+        p_new: np,
+      });
+      if (res?.ok) {
+        setMemberCode(np);
+        setMemberNewPass("");
+        setMemberPassMsg("✓ 合言葉を変更しました。");
+      } else {
+        setMemberPassMsg("変更に失敗しました。");
+      }
+    } catch (e) {
+      setMemberPassMsg("変更に失敗しました。");
     } finally {
       setBusy(false);
     }
@@ -157,6 +271,7 @@ function ShiftRequestApp() {
     } else setViewMonth(viewMonth + 1);
   }
 
+  // ---- リーダー ----
   async function tryUnlock() {
     setBusy(true);
     setPassError(false);
@@ -177,6 +292,8 @@ function ShiftRequestApp() {
   function switchMode(next) {
     setMode(next);
     setErrMsg("");
+    // 画面を切り替えたら、メンバーのログインは解除（安全のため）
+    memberLogout();
     if (next === "member") {
       setUnlocked(false);
       setLeaderCode("");
@@ -184,6 +301,7 @@ function ShiftRequestApp() {
       setPassError(false);
       setLeaderData(null);
       setPassMsg("");
+      setResetMsg("");
     }
   }
 
@@ -256,6 +374,25 @@ function ShiftRequestApp() {
     }
   }
 
+  async function resetMemberPasscode() {
+    const t = resetTarget || members[0] || "";
+    if (!t) return;
+    setBusy(true);
+    setResetMsg("");
+    try {
+      const res = await callRpc("app_leader_reset_member_passcode", {
+        p_code: leaderCode,
+        p_member: t,
+      });
+      if (res?.ok) setResetMsg("✓ " + t + " さんの合言葉を「1234」に戻しました。");
+      else setResetMsg("リセットに失敗しました。");
+    } catch (e) {
+      setResetMsg("リセットに失敗しました。");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   const firstDay = new Date(viewYear, viewMonth, 1).getDay();
   const daysInMonth = new Date(viewYear, viewMonth + 1, 0).getDate();
 
@@ -273,6 +410,12 @@ function ShiftRequestApp() {
     () => new Set(leaderData?.submissions || []),
     [leaderData]
   );
+
+  const notesMap = useMemo(() => {
+    const map = {};
+    for (const n of leaderData?.notes || []) map[n.name] = n.note;
+    return map;
+  }, [leaderData]);
 
   const styles = {
     wrap: { maxWidth: 860, margin: "0 auto", padding: "24px 16px", fontFamily: "system-ui, -apple-system, sans-serif", color: "#1f2933" },
@@ -293,6 +436,7 @@ function ShiftRequestApp() {
     submitBtn: { marginTop: 16, padding: "12px 20px", borderRadius: 10, border: "none", background: "#16a34a", color: "#fff", fontWeight: 700, fontSize: 15, cursor: "pointer", width: "100%", opacity: busy ? 0.6 : 1 },
     heat: (n) => ({ background: n === 0 ? "#fff" : n === 1 ? "#fde68a" : n <= 3 ? "#fbbf24" : "#f87171", color: n > 3 ? "#fff" : "#374151" }),
     primaryBtn: { padding: "8px 20px", borderRadius: 8, border: "none", background: "#2563eb", color: "#fff", fontWeight: 700, cursor: "pointer", opacity: busy ? 0.6 : 1 },
+    linkBtn: { border: "none", background: "transparent", color: "#2563eb", fontWeight: 600, cursor: "pointer", fontSize: 13 },
   };
 
   if (!isConfigured) {
@@ -339,60 +483,119 @@ function ShiftRequestApp() {
       </div>
 
       {mode === "member" ? (
-        <div style={styles.card}>
-          <div style={{ marginBottom: 16 }}>
-            <label style={{ fontSize: 13, color: "#6b7280", marginRight: 8 }}>あなたの名前</label>
-            <select style={styles.select} value={currentMember} onChange={(e) => setCurrentMember(e.target.value)}>
-              {members.map((m) => <option key={m} value={m}>{m}</option>)}
-            </select>
-          </div>
-          <p style={{ fontSize: 13, color: "#6b7280", marginTop: 0 }}>休みたい日をタップして選んでください。青い日をもう一度タップで解除できます</p>
-          <div style={styles.grid}>
-            {WEEKDAYS.map((w, i) => <div key={w} style={styles.dow(i)}>{w}</div>)}
-            {Array.from({ length: firstDay }).map((_, i) => <div key={"e" + i} style={styles.cell(false, true)} />)}
-            {Array.from({ length: daysInMonth }).map((_, i) => {
-              const day = i + 1;
-              const key = ymd(viewYear, viewMonth, day);
-              const selected = key in mySel;
-              const hasMemo = selected && mySel[key]?.trim();
-              return (
-                <div key={day} style={{ ...styles.cell(selected, false), position: "relative" }} onClick={() => toggleDay(day)}>
-                  {day}
-                  {hasMemo && <span style={{ position: "absolute", bottom: 4, width: 5, height: 5, borderRadius: "50%", background: "#fff" }} />}
-                </div>
-              );
-            })}
-          </div>
-
-          {mySelKeysThisMonth.length > 0 && (
-            <div style={{ marginTop: 16, borderTop: "1px solid #f3f4f6", paddingTop: 12 }}>
-              <p style={{ fontSize: 13, fontWeight: 600, margin: "0 0 8px" }}>選択した日（メモは任意）</p>
-              {mySelKeysThisMonth.map((key) => {
-                const d = parseInt(key.split("-")[2], 10);
-                return (
-                  <div key={key} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
-                    <div style={{ width: 48, fontSize: 14, fontWeight: 600 }}>{d}日</div>
-                    <input
-                      value={mySel[key]}
-                      onChange={(e) => setMemo(key, e.target.value)}
-                      placeholder="例：18時から可能（空欄なら終日休み）"
-                      style={{ ...styles.select, flex: 1 }}
-                    />
-                    <button
-                      onClick={() => toggleDay(d)}
-                      aria-label={d + "日を解除"}
-                      style={{ border: "none", background: "#e5e7eb", color: "#6b7280", borderRadius: 8, width: 32, height: 32, cursor: "pointer", fontSize: 16 }}
-                    >×</button>
-                  </div>
-                );
-              })}
+        !memberUnlocked ? (
+          <div style={styles.card}>
+            <h3 style={{ marginTop: 0, fontSize: 16 }}>本人ログイン</h3>
+            <div style={{ marginBottom: 12 }}>
+              <label style={{ fontSize: 13, color: "#6b7280", marginRight: 8 }}>あなたの名前</label>
+              <select style={styles.select} value={currentMember} onChange={(e) => setCurrentMember(e.target.value)}>
+                {members.map((m) => <option key={m} value={m}>{m}</option>)}
+              </select>
             </div>
-          )}
+            <p style={{ fontSize: 13, color: "#6b7280", marginTop: 0 }}>
+              あなたの合言葉を入力してください（初期値: {LEADER_HINT}）。本人だけが自分の希望を確認・提出できます。
+            </p>
+            <div style={{ display: "flex", gap: 8 }}>
+              <input
+                type="password"
+                value={memberPassInput}
+                onChange={(e) => { setMemberPassInput(e.target.value); setMemberPassError(false); }}
+                onKeyDown={(e) => { if (e.key === "Enter") memberUnlock(); }}
+                placeholder="あなたの合言葉"
+                style={{ ...styles.select, flex: 1 }}
+              />
+              <button style={styles.primaryBtn} onClick={memberUnlock} disabled={busy}>
+                {busy ? "確認中…" : "ログイン"}
+              </button>
+            </div>
+            {memberPassError && <p style={{ color: "#dc2626", fontSize: 13, marginBottom: 0 }}>合言葉が違います</p>}
+          </div>
+        ) : (
+          <>
+            <div style={styles.card}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
+                <div style={{ fontSize: 14 }}>こんにちは、<b>{currentMember}</b> さん</div>
+                <button style={styles.linkBtn} onClick={memberLogout}>別の人に切り替え</button>
+              </div>
+              <p style={{ fontSize: 13, color: "#6b7280", marginTop: 0 }}>休みたい日をタップして選んでください。青い日をもう一度タップで解除できます</p>
+              <div style={styles.grid}>
+                {WEEKDAYS.map((w, i) => <div key={w} style={styles.dow(i)}>{w}</div>)}
+                {Array.from({ length: firstDay }).map((_, i) => <div key={"e" + i} style={styles.cell(false, true)} />)}
+                {Array.from({ length: daysInMonth }).map((_, i) => {
+                  const day = i + 1;
+                  const key = ymd(viewYear, viewMonth, day);
+                  const selected = key in mySel;
+                  const hasMemo = selected && mySel[key]?.trim();
+                  return (
+                    <div key={day} style={{ ...styles.cell(selected, false), position: "relative" }} onClick={() => toggleDay(day)}>
+                      {day}
+                      {hasMemo && <span style={{ position: "absolute", bottom: 4, width: 5, height: 5, borderRadius: "50%", background: "#fff" }} />}
+                    </div>
+                  );
+                })}
+              </div>
 
-          <button style={styles.submitBtn} onClick={submit} disabled={busy}>
-            {busy ? "処理中…" : mySubmitted ? "✓ 送信済み（再送信で更新）" : "この内容で送信"}
-          </button>
-        </div>
+              {mySelKeysThisMonth.length > 0 && (
+                <div style={{ marginTop: 16, borderTop: "1px solid #f3f4f6", paddingTop: 12 }}>
+                  <p style={{ fontSize: 13, fontWeight: 600, margin: "0 0 8px" }}>選択した日（メモは任意）</p>
+                  {mySelKeysThisMonth.map((key) => {
+                    const d = parseInt(key.split("-")[2], 10);
+                    return (
+                      <div key={key} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+                        <div style={{ width: 48, fontSize: 14, fontWeight: 600 }}>{d}日</div>
+                        <input
+                          value={mySel[key]}
+                          onChange={(e) => setMemo(key, e.target.value)}
+                          placeholder="例：18時から可能（空欄なら終日休み）"
+                          style={{ ...styles.select, flex: 1 }}
+                        />
+                        <button
+                          onClick={() => toggleDay(d)}
+                          aria-label={d + "日を解除"}
+                          style={{ border: "none", background: "#e5e7eb", color: "#6b7280", borderRadius: 8, width: 32, height: 32, cursor: "pointer", fontSize: 16 }}
+                        >×</button>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
+              <div style={{ marginTop: 16, borderTop: "1px solid #f3f4f6", paddingTop: 12 }}>
+                <p style={{ fontSize: 13, fontWeight: 600, margin: "0 0 6px" }}>リーダーへの連絡（その月全体・任意）</p>
+                <textarea
+                  value={myNote}
+                  onChange={(e) => { setMyNote(e.target.value); setMySubmitted(false); }}
+                  placeholder="例：今月は帰省のため18〜26は休みます。就活でほぼ入れません。"
+                  rows={3}
+                  style={{ width: "100%", boxSizing: "border-box", padding: "8px 12px", borderRadius: 8, border: "1px solid #d1d5db", fontSize: 14, fontFamily: "inherit", resize: "vertical" }}
+                />
+              </div>
+
+              <button style={styles.submitBtn} onClick={submit} disabled={busy}>
+                {busy ? "処理中…" : mySubmitted ? "✓ 送信済み（再送信で更新）" : "この内容で送信"}
+              </button>
+            </div>
+
+            <div style={styles.card}>
+              <h3 style={{ marginTop: 0, fontSize: 16 }}>自分の合言葉の変更</h3>
+              <p style={{ fontSize: 12, color: "#6b7280", marginTop: 0 }}>
+                初期値「1234」から、自分だけの合言葉（4文字以上）に変えられます。
+              </p>
+              <div style={{ display: "flex", gap: 8 }}>
+                <input
+                  type="text"
+                  value={memberNewPass}
+                  onChange={(e) => { setMemberNewPass(e.target.value); setMemberPassMsg(""); }}
+                  onKeyDown={(e) => { if (e.key === "Enter") changeMemberPasscode(); }}
+                  placeholder="新しい合言葉（4文字以上）"
+                  style={{ ...styles.select, flex: 1 }}
+                />
+                <button style={styles.primaryBtn} onClick={changeMemberPasscode} disabled={busy}>変更</button>
+              </div>
+              {memberPassMsg && <p style={{ fontSize: 13, marginBottom: 0, color: memberPassMsg.startsWith("✓") ? "#16a34a" : "#dc2626" }}>{memberPassMsg}</p>}
+            </div>
+          </>
+        )
       ) : !unlocked ? (
         <div style={styles.card}>
           <h3 style={{ marginTop: 0, fontSize: 16 }}>リーダー用画面</h3>
@@ -464,6 +667,7 @@ function ShiftRequestApp() {
                 .filter((r) => r.name === m)
                 .forEach((r) => { memoOf[r.ymd] = r.memo; });
               const done = submittedSet.has(m);
+              const note = notesMap[m]?.trim();
               return (
                 <div key={m} style={{ display: "flex", alignItems: "flex-start", padding: "8px 0", borderBottom: "1px solid #f3f4f6" }}>
                   <div style={{ width: 70, fontWeight: 600, fontSize: 14 }}>{m}</div>
@@ -478,6 +682,11 @@ function ShiftRequestApp() {
                         </span>
                       );
                     }) : "希望なし"}
+                    {note && (
+                      <div style={{ marginTop: 4, background: "#eff6ff", border: "1px solid #bfdbfe", borderRadius: 8, padding: "6px 10px", color: "#1e40af", fontSize: 12, whiteSpace: "pre-wrap" }}>
+                        📩 {note}
+                      </div>
+                    )}
                   </div>
                 </div>
               );
@@ -487,7 +696,7 @@ function ShiftRequestApp() {
           <div style={styles.card}>
             <h3 style={{ marginTop: 0, fontSize: 16 }}>メンバー名簿の管理</h3>
             <p style={{ fontSize: 12, color: "#6b7280", marginTop: 0 }}>
-              名前を追加・削除できます。削除するとその人の希望データも消えます（{members.length}人）
+              名前を追加・削除できます。追加した人の合言葉は「1234」です。削除するとその人の希望データも消えます（{members.length}人）
             </p>
             <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
               <input
@@ -514,7 +723,25 @@ function ShiftRequestApp() {
           </div>
 
           <div style={styles.card}>
-            <h3 style={{ marginTop: 0, fontSize: 16 }}>合言葉の変更</h3>
+            <h3 style={{ marginTop: 0, fontSize: 16 }}>メンバーの合言葉をリセット</h3>
+            <p style={{ fontSize: 12, color: "#6b7280", marginTop: 0 }}>
+              合言葉を忘れたメンバーを選んでリセットすると、その人の合言葉が「1234」に戻ります。
+            </p>
+            <div style={{ display: "flex", gap: 8 }}>
+              <select
+                style={{ ...styles.select, flex: 1 }}
+                value={resetTarget || (members[0] || "")}
+                onChange={(e) => { setResetTarget(e.target.value); setResetMsg(""); }}
+              >
+                {members.map((m) => <option key={m} value={m}>{m}</option>)}
+              </select>
+              <button style={styles.primaryBtn} onClick={resetMemberPasscode} disabled={busy}>1234にリセット</button>
+            </div>
+            {resetMsg && <p style={{ fontSize: 13, marginBottom: 0, color: resetMsg.startsWith("✓") ? "#16a34a" : "#dc2626" }}>{resetMsg}</p>}
+          </div>
+
+          <div style={styles.card}>
+            <h3 style={{ marginTop: 0, fontSize: 16 }}>リーダーの合言葉の変更</h3>
             <p style={{ fontSize: 12, color: "#6b7280", marginTop: 0 }}>
               安全のため、初期値の「1234」から推測されにくい合言葉（英数字の組み合わせなど）に変更することをおすすめします。
             </p>
